@@ -2,32 +2,9 @@
 
 import re
 import requests
-from typing import Optional, Tuple
-
-# ----------------------------------------------------------
-# Extract YouTube Video ID
-# ----------------------------------------------------------
-def extract_video_id(url: str) -> Optional[str]:
-    """Extract video ID from various YouTube URL formats."""
-    patterns = [
-        r"(?:v=|/)([a-zA-Z0-9_-]{11})(?:[&?/]|$)",
-        r"youtu\.be/([a-zA-Z0-9_-]{11})",
-        r"youtube\.com/embed/([a-zA-Z0-9_-]{11})",
-        r"youtube\.com/shorts/([a-zA-Z0-9_-]{11})"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-
-# utils.py
-
-import re
-import requests
 import time
 from typing import Optional, Tuple
+import json
 
 # ----------------------------------------------------------
 # Extract YouTube Video ID
@@ -48,11 +25,11 @@ def extract_video_id(url: str) -> Optional[str]:
 
 
 # ----------------------------------------------------------
-# Fetch transcript with rate limiting
+# Fetch transcript with multiple fallback methods
 # ----------------------------------------------------------
 def get_transcript(video_id: str, preferred_languages: list = None) -> Tuple[Optional[str], Optional[str]]:
     """
-    Fetch transcript with rate limiting to avoid 429 errors.
+    Fetch transcript using multiple methods to avoid rate limiting.
     
     Args:
         video_id: YouTube video ID
@@ -61,222 +38,205 @@ def get_transcript(video_id: str, preferred_languages: list = None) -> Tuple[Opt
     Returns:
         Tuple of (transcript_text, detected_language_code) or (None, None)
     """
-    if preferred_languages is None:
-        # Simplified language list to reduce requests
-        preferred_languages = ['en', 'hi', 'es', 'fr', 'de']
-    
     print(f"🔍 Fetching transcript for video: {video_id}")
     
-    # Add delay to avoid rate limiting
-    time.sleep(1)
-    
-    # Try youtube-transcript-api with simplified approach
-    transcript, detected_lang = _fetch_transcript_simple(video_id, preferred_languages)
+    # Method 1: Try YouTube Transcript API (third-party service) - No rate limit
+    transcript, lang = _fetch_from_youtube_transcript_api_service(video_id)
     if transcript:
-        return transcript, detected_lang
+        return transcript, lang
     
-    # Fallback to GetProxyTube
-    print("🔄 Trying GetProxyTube API as fallback...")
-    time.sleep(2)  # Wait before fallback
-    fallback = _fetch_from_getproxytube(video_id)
-    if fallback:
-        return fallback, 'unknown'
+    # Method 2: Try youtube-transcript-api library (with delays)
+    time.sleep(2)
+    transcript, lang = _fetch_from_youtube_library(video_id)
+    if transcript:
+        return transcript, lang
+    
+    # Method 3: Try direct YouTube API
+    time.sleep(2)
+    transcript, lang = _fetch_direct_from_youtube(video_id)
+    if transcript:
+        return transcript, lang
     
     return None, None
 
 
-def _fetch_transcript_simple(video_id: str, preferred_languages: list) -> Tuple[Optional[str], Optional[str]]:
-    """Simplified transcript fetching to minimize API calls."""
+def _fetch_from_youtube_transcript_api_service(video_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Fetch from free third-party transcript API service.
+    This service acts as a proxy and helps avoid rate limiting.
+    """
+    try:
+        print("📥 Trying YouTube Transcript API service...")
+        
+        # Try multiple free transcript services
+        services = [
+            f"https://youtube-transcript-api.onrender.com/transcript?video_id={video_id}",
+            f"https://yt-transcript-api.vercel.app/api/transcript?videoId={video_id}",
+        ]
+        
+        for service_url in services:
+            try:
+                response = requests.get(service_url, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # Handle different response formats
+                    if isinstance(data, dict):
+                        if 'transcript' in data:
+                            transcript_data = data['transcript']
+                        elif 'text' in data:
+                            return data['text'], 'en'
+                        else:
+                            transcript_data = data
+                    else:
+                        transcript_data = data
+                    
+                    # Extract text
+                    if isinstance(transcript_data, list):
+                        chunks = []
+                        for entry in transcript_data:
+                            if isinstance(entry, dict):
+                                text = entry.get('text', '') or entry.get('snippet', {}).get('text', '')
+                            else:
+                                text = str(entry)
+                            if text:
+                                chunks.append(text.strip())
+                        
+                        final_transcript = " ".join(chunks).strip()
+                        
+                        if final_transcript:
+                            print(f"✅ Transcript fetched via API service ({len(final_transcript)} chars)")
+                            return final_transcript, 'en'
+                
+            except Exception as e:
+                continue
+        
+        print("⚠️ API services unavailable")
+        return None, None
+        
+    except Exception as e:
+        print(f"⚠️ API service error: {str(e)[:50]}")
+        return None, None
+
+
+def _fetch_from_youtube_library(video_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """Fallback to youtube-transcript-api library with minimal requests."""
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
-        from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+        from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, TooManyRequests
         
-        print("📥 Using youtube-transcript-api...")
+        print("📥 Trying youtube-transcript-api library...")
         
-        # Method 1: Try simple get_transcript (best for most videos)
+        # Try only English to minimize requests
         try:
-            print("🔄 Attempting simple transcript fetch...")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=['en'])
             
             if transcript_list:
                 chunks = [entry['text'].strip() for entry in transcript_list if entry.get('text')]
                 final_transcript = " ".join(chunks).strip()
                 
                 if final_transcript:
-                    print(f"✅ Transcript fetched ({len(final_transcript)} chars)")
+                    print(f"✅ Library fetch successful ({len(final_transcript)} chars)")
                     return final_transcript, 'en'
+        
+        except TooManyRequests:
+            print("⚠️ Rate limited - waiting...")
+            time.sleep(10)
         except NoTranscriptFound:
-            print("⚠️ No default transcript, trying specific languages...")
+            print("⚠️ No English transcript")
         except TranscriptsDisabled:
-            print("❌ Transcripts disabled for this video")
-            return None, None
+            print("⚠️ Transcripts disabled")
         except Exception as e:
-            if "429" in str(e) or "Too Many Requests" in str(e):
-                print("⚠️ Rate limited by YouTube. Please wait a moment...")
-                time.sleep(5)
+            if "429" in str(e):
+                print("⚠️ Rate limited")
             else:
-                print(f"⚠️ Error: {str(e)[:100]}")
+                print(f"⚠️ Error: {str(e)[:50]}")
         
-        # Method 2: Try each preferred language (only first 3 to avoid rate limiting)
-        for lang_code in preferred_languages[:3]:
-            try:
-                time.sleep(0.5)  # Small delay between attempts
-                print(f"🔄 Trying {lang_code}...")
-                
-                transcript_list = YouTubeTranscriptApi.get_transcript(
-                    video_id,
-                    languages=[lang_code]
-                )
-                
-                if transcript_list:
-                    chunks = [entry['text'].strip() for entry in transcript_list if entry.get('text')]
-                    final_transcript = " ".join(chunks).strip()
-                    
-                    if final_transcript:
-                        lang_name = _get_language_name(lang_code)
-                        print(f"✅ Found transcript in {lang_name}")
-                        return final_transcript, lang_code
-                        
-            except NoTranscriptFound:
-                continue
-            except Exception as e:
-                if "429" in str(e):
-                    print("⚠️ Rate limited. Stopping attempts.")
-                    break
-                continue
-        
-        print("❌ No transcript available")
         return None, None
-            
+        
     except ImportError:
-        print("❌ youtube-transcript-api not installed")
+        print("⚠️ youtube-transcript-api not installed")
         return None, None
-    except Exception as e:
-        print(f"❌ Unexpected error: {str(e)[:100]}")
-        return None, None
-    """Primary method using youtube-transcript-api with multi-language support."""
+
+
+def _fetch_direct_from_youtube(video_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Try to fetch captions directly from YouTube's timedtext API.
+    This is a more direct approach that might work when others fail.
+    """
     try:
-        # Import the library
-        try:
-            from youtube_transcript_api import YouTubeTranscriptApi
-            from youtube_transcript_api._errors import (
-                TranscriptsDisabled,
-                NoTranscriptFound,
-                VideoUnavailable
-            )
-        except ImportError as e:
-            print(f"❌ Import error: {e}")
-            print("   Make sure youtube-transcript-api is installed")
+        print("📥 Trying direct YouTube API...")
+        
+        # Get video page to find caption tracks
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
+        response = requests.get(video_url, headers=headers, timeout=10)
+        
+        if response.status_code != 200:
             return None, None
         
-        print("📥 Using youtube-transcript-api...")
+        # Look for caption tracks in the page
+        content = response.text
         
-        # Method 1: Try get_transcript with each language
-        for lang_code in preferred_languages:
-            try:
-                print(f"🔄 Trying language: {lang_code}")
+        # Find captionTracks in the page source
+        caption_track_pattern = r'"captionTracks":\s*(\[.*?\])'
+        match = re.search(caption_track_pattern, content)
+        
+        if not match:
+            print("⚠️ No caption tracks found")
+            return None, None
+        
+        try:
+            caption_tracks = json.loads(match.group(1))
+            
+            # Try to find English caption
+            caption_url = None
+            for track in caption_tracks:
+                if 'baseUrl' in track:
+                    lang_code = track.get('languageCode', '')
+                    if lang_code.startswith('en'):
+                        caption_url = track['baseUrl']
+                        break
+            
+            # If no English, take first available
+            if not caption_url and caption_tracks:
+                caption_url = caption_tracks[0].get('baseUrl')
+            
+            if caption_url:
+                # Fetch the captions
+                time.sleep(1)
+                caption_response = requests.get(caption_url, headers=headers, timeout=10)
                 
-                # This is the most compatible method
-                transcript_list = YouTubeTranscriptApi.get_transcript(
-                    video_id,
-                    languages=[lang_code]
-                )
-                
-                # Extract text from transcript entries
-                if transcript_list and len(transcript_list) > 0:
-                    chunks = [entry['text'].strip() for entry in transcript_list if entry.get('text')]
-                    final_transcript = " ".join(chunks).strip()
+                if caption_response.status_code == 200:
+                    # Parse XML captions
+                    caption_text = caption_response.text
                     
-                    if final_transcript:
-                        lang_name = _get_language_name(lang_code)
-                        print(f"✅ Transcript fetched in {lang_name} ({len(final_transcript)} chars)")
-                        return final_transcript, lang_code
+                    # Extract text from XML
+                    text_pattern = r'<text[^>]*>(.*?)</text>'
+                    texts = re.findall(text_pattern, caption_text, re.DOTALL)
+                    
+                    if texts:
+                        # Clean up HTML entities
+                        import html
+                        cleaned_texts = [html.unescape(text.strip()) for text in texts]
+                        final_transcript = " ".join(cleaned_texts)
                         
-            except NoTranscriptFound:
-                print(f"⚠️ No transcript found for {lang_code}")
-                continue
-            except Exception as e:
-                print(f"⚠️ Error with {lang_code}: {str(e)}")
-                continue
+                        if final_transcript:
+                            print(f"✅ Direct API fetch successful ({len(final_transcript)} chars)")
+                            return final_transcript, 'en'
         
-        # Method 2: Try to get any available transcript (no language filter)
-        try:
-            print("🔄 Trying to fetch any available transcript...")
-            
-            # Get available transcripts list
-            transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
-            
-            # Try manual transcripts first
-            print("🔄 Checking manual transcripts...")
-            try:
-                for transcript_info in transcript_list_obj:
-                    if not transcript_info.is_generated:
-                        print(f"   Found manual: {transcript_info.language} ({transcript_info.language_code})")
-                        try:
-                            transcript_data = transcript_info.fetch()
-                            chunks = [entry['text'].strip() for entry in transcript_data if entry.get('text')]
-                            final_transcript = " ".join(chunks).strip()
-                            
-                            if final_transcript:
-                                print(f"✅ Using manual transcript: {transcript_info.language_code}")
-                                return final_transcript, transcript_info.language_code
-                        except Exception as e:
-                            print(f"   Error fetching: {e}")
-                            continue
-            except Exception as e:
-                print(f"⚠️ Error with manual transcripts: {e}")
-            
-            # Try auto-generated transcripts
-            print("🔄 Checking auto-generated transcripts...")
-            try:
-                for transcript_info in transcript_list_obj:
-                    if transcript_info.is_generated:
-                        print(f"   Found auto: {transcript_info.language} ({transcript_info.language_code})")
-                        try:
-                            transcript_data = transcript_info.fetch()
-                            chunks = [entry['text'].strip() for entry in transcript_data if entry.get('text')]
-                            final_transcript = " ".join(chunks).strip()
-                            
-                            if final_transcript:
-                                print(f"✅ Using auto-generated transcript: {transcript_info.language_code}")
-                                return final_transcript, transcript_info.language_code
-                        except Exception as e:
-                            print(f"   Error fetching: {e}")
-                            continue
-            except Exception as e:
-                print(f"⚠️ Error with auto-generated transcripts: {e}")
-                
-        except TranscriptsDisabled:
-            print("❌ Transcripts are disabled for this video")
-        except VideoUnavailable:
-            print("❌ Video is unavailable")
-        except Exception as e:
-            print(f"⚠️ Error listing transcripts: {str(e)}")
+        except json.JSONDecodeError:
+            print("⚠️ Could not parse caption data")
         
-        # Method 3: Last resort - try without any language specification
-        try:
-            print("🔄 Last attempt: fetching default transcript...")
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-            
-            if transcript_list and len(transcript_list) > 0:
-                chunks = [entry['text'].strip() for entry in transcript_list if entry.get('text')]
-                final_transcript = " ".join(chunks).strip()
-                
-                if final_transcript:
-                    print(f"✅ Transcript fetched (default, {len(final_transcript)} chars)")
-                    return final_transcript, 'auto'
-        except Exception as e:
-            print(f"⚠️ Default fetch failed: {str(e)}")
-        
-        print("❌ No transcript available in any language")
-        print("   This video may not have captions/subtitles enabled")
         return None, None
-            
+        
     except Exception as e:
-        print(f"❌ Unexpected error in transcript fetch: {e}")
-        import traceback
-        print("Full traceback:")
-        traceback.print_exc()
+        print(f"⚠️ Direct API error: {str(e)[:50]}")
         return None, None
 
 
@@ -301,7 +261,8 @@ def _get_language_name(lang_code: str) -> str:
         'kn': 'Kannada (ಕನ್ನಡ)',
         'ml': 'Malayalam (മലയാളം)',
         'pa': 'Punjabi (ਪੰਜਾਬੀ)',
-        'auto': 'Auto-detected'
+        'auto': 'Auto-detected',
+        'unknown': 'Unknown'
     }
     return language_map.get(lang_code, lang_code.upper())
 
@@ -318,7 +279,6 @@ def _fetch_from_getproxytube(video_id: str) -> Optional[str]:
         print("🔄 Trying GetProxyTube API...")
         resp = requests.get(url, timeout=15, headers=headers, allow_redirects=True)
         
-        # Check if response is JSON
         content_type = resp.headers.get("Content-Type", "")
         if resp.status_code == 200 and "application/json" in content_type:
             data = resp.json()
@@ -330,18 +290,7 @@ def _fetch_from_getproxytube(video_id: str) -> Optional[str]:
                 if transcript:
                     print(f"✅ GetProxyTube successful ({len(transcript)} chars)")
                     return transcript
-                else:
-                    print("⚠️ Empty transcript from GetProxyTube")
-            else:
-                print(f"⚠️ Invalid response structure from GetProxyTube")
-        else:
-            print(f"⚠️ Non-JSON response from GetProxyTube (Status: {resp.status_code})")
-            
-    except requests.exceptions.Timeout:
-        print("⏱️ GetProxyTube request timed out")
-    except requests.exceptions.RequestException as e:
-        print(f"❌ GetProxyTube request error: {e}")
-    except Exception as e:
-        print(f"❌ GetProxyTube unexpected error: {e}")
+    except:
+        pass
     
     return None

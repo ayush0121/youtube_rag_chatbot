@@ -672,19 +672,39 @@ st.markdown("""
 # Input Section
 st.markdown("<div class='input-section'>", unsafe_allow_html=True)
 
-col1, col2 = st.columns([5, 1])
+# Tabs for URL or Manual Transcript
+tab1, tab2 = st.tabs(["📺 From YouTube URL", "📝 Paste Transcript Manually"])
 
-with col1:
-    video_url = st.text_input(
-        "🔗 Enter YouTube Video URL",
-        value=st.session_state.video_url,
-        placeholder="https://www.youtube.com/watch?v=...",
-        label_visibility="collapsed"
+with tab1:
+    col1, col2 = st.columns([5, 1])
+    
+    with col1:
+        video_url = st.text_input(
+            "🔗 Enter YouTube Video URL",
+            value=st.session_state.video_url,
+            placeholder="https://www.youtube.com/watch?v=...",
+            label_visibility="collapsed",
+            key="url_input"
+        )
+    
+    with col2:
+        st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+        load_button = st.button("🚀 Load", type="primary", use_container_width=True, key="load_url")
+
+with tab2:
+    st.markdown("**If YouTube is rate-limiting, you can manually paste the transcript:**")
+    st.markdown("1. Go to the YouTube video")
+    st.markdown("2. Click '...' → 'Show transcript'")
+    st.markdown("3. Copy all the text and paste below")
+    
+    manual_transcript = st.text_area(
+        "Paste transcript here:",
+        height=200,
+        placeholder="Paste the video transcript here...",
+        key="manual_transcript"
     )
-
-with col2:
-    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-    load_button = st.button("🚀 Load", type="primary", use_container_width=True)
+    
+    manual_load_button = st.button("📥 Load Manual Transcript", type="primary", use_container_width=True, key="load_manual")
 
 st.markdown("</div>", unsafe_allow_html=True)
 
