@@ -81,17 +81,16 @@ def _fetch_from_youtube_transcript_api(video_id: str, preferred_languages: list)
         
         print("📥 Using youtube-transcript-api...")
         
-        # v1.2.3+ requires instantiating the class first
-        ytt_api = YouTubeTranscriptApi()
-        
         # Try each language in order of preference
         for lang_code in preferred_languages:
             try:
                 print(f"🔄 Trying language: {lang_code}")
-                fetched = ytt_api.fetch(video_id, languages=[lang_code])
                 
-                # Extract text from snippets
-                chunks = [snippet.text.strip() for snippet in fetched.snippets if snippet.text]
+                # Use the standard API method that works across versions
+                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=[lang_code])
+                
+                # Extract text from transcript entries
+                chunks = [entry['text'].strip() for entry in transcript_list if entry.get('text')]
                 final_transcript = " ".join(chunks).strip()
                 
                 if final_transcript:
@@ -99,31 +98,55 @@ def _fetch_from_youtube_transcript_api(video_id: str, preferred_languages: list)
                     print(f"✅ Transcript fetched in {lang_name} ({len(final_transcript)} chars)")
                     return final_transcript, lang_code
             except Exception as e:
-                print(f"⚠️ {lang_code} not available")
+                print(f"⚠️ {lang_code} not available: {str(e)}")
                 continue
         
-        # Last resort: try without language specification
+        # Last resort: try without language specification (gets default)
         try:
             print("🔄 Trying auto-detect language...")
-            fetched = ytt_api.fetch(video_id)
-            chunks = [snippet.text.strip() for snippet in fetched.snippets if snippet.text]
+            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+            
+            chunks = [entry['text'].strip() for entry in transcript_list if entry.get('text')]
             final_transcript = " ".join(chunks).strip()
             
             if final_transcript:
                 print(f"✅ Transcript fetched (auto-detected language, {len(final_transcript)} chars)")
                 return final_transcript, 'auto'
-        except:
-            pass
+        except Exception as e:
+            print(f"⚠️ Auto-detect failed: {str(e)}")
+        
+        # Try to list available transcripts
+        try:
+            print("🔄 Checking available transcripts...")
+            transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            # Try to get any available transcript
+            for transcript in transcript_list_obj:
+                try:
+                    print(f"🔄 Found transcript in: {transcript.language_code}")
+                    fetched = transcript.fetch()
+                    chunks = [entry['text'].strip() for entry in fetched if entry.get('text')]
+                    final_transcript = " ".join(chunks).strip()
+                    
+                    if final_transcript:
+                        print(f"✅ Using {transcript.language_code} transcript")
+                        return final_transcript, transcript.language_code
+                except:
+                    continue
+        except Exception as e:
+            print(f"⚠️ Could not list transcripts: {str(e)}")
         
         print("❌ No transcript available in any language")
         return None, None
             
     except ImportError:
         print("❌ youtube-transcript-api not installed")
-        print("   Install with: pip install youtube-transcript-api")
+        print("   Install with: pip install youtube-transcript-api==0.6.1")
         return None, None
     except Exception as e:
         print(f"❌ Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
         return None, None
 
 
